@@ -1,7 +1,11 @@
-"""Handles missing values and turns continuous numbers into bins"""
+"""Handles missing values and builds time-lagged arrays for SURD.
 
-import pandas as pd
+SURD needs pairs of past and future observations. This module
+takes a time-series DataFrame and constructs those pairs.
+"""
+
 import numpy as np
+import pandas as pd
 
 from src.logger import get_logger
 
@@ -9,32 +13,49 @@ logger = get_logger(__name__)
 
 
 def handle_missing(df: pd.DataFrame, strategy: str = "drop") -> pd.DataFrame:
-    """Deal with missing values using the chosen strategy
+    """Deal with missing values.
 
-    Args:
-        df: Input DataFrame (only the columns we care about)
-        strategy: 'drop' removes rows with NaNs, 'mean' fills them with column averages
+    'drop' removes rows with any NaN. 'mean' fills gaps with column averages.
     """
     if strategy == "mean":
         filled = df.fillna(df.mean(numeric_only=True))
         logger.info("Filled missing values with column means.")
         return filled
 
-    # Default: drop rows that have any NaN.
     cleaned = df.dropna()
     logger.info("Dropped rows with missing values (%d -> %d rows).", len(df), len(cleaned))
     return cleaned
 
 
-def discretise(df: pd.DataFrame, columns: list[str], bins: int = 5) -> pd.DataFrame:
-    """Cut numeric columns into equal-width bins
+def build_lagged_array(target_series: np.ndarray, agent_series: list[np.ndarray],
+                       tau: int) -> np.ndarray:
+    """Stack the target's future with the agents' past.
 
-    This is a simple placeholder — a real SURD implementation may need
-    a smarter binning approach
+    Row 0 = target shifted forward by tau steps (the future).
+    Rows 1..n = each agent's values at the earlier time (the past).
+    Columns = time points where both past and future are available.
+
+    This is the format the official SURD algorithm expects.
     """
-    out = df.copy()
-    for col in columns:
-        if pd.api.types.is_numeric_dtype(out[col]):
-            out[col] = pd.cut(out[col], bins=bins, labels=False, duplicates="drop")
-    logger.info("Discretised %d columns into %d bins.", len(columns), bins)
-    return out
+    if tau < 1:
+        raise ValueError("Time lag tau must be at least 1.")
+
+    future = target_series[tau:]
+    rows = [future]
+    for agent in agent_series:
+        rows.append(agent[:-tau] if tau > 0 else agent)
+
+    stacked = np.vstack(rows)
+    logger.info("Built lagged array: %d variables x %d timepoints (tau=%d).",
+                stacked.shape[0], stacked.shape[1], tau)
+    return stacked
+
+
+def build_histogram(Y: np.ndarray, nbins: int) -> np.ndarray:
+    """Build a joint histogram from the lagged array.
+
+    Y has shape (n_variables, n_timepoints). The histogram has
+    one dimension per variable, each with nbins bins.
+    """
+    hist, _ = np.histogramdd(Y.T, bins=nbins)
+    return hist

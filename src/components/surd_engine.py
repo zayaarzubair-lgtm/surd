@@ -1,177 +1,117 @@
-"""Computes Partial Information Decomposition for 2 sources and 1 target.
+"""My wrapper around the official SURD algorithm.
 
-Method: I_min (Williams & Beer, 2010).
-For >2 sources we run PID on every pair and aggregate.
+This handles: extracting columns from a DataFrame, building time-lagged
+arrays, computing the histogram, calling the official surd() function,
+and packaging the results into a dict that the rest of my dashboard uses.
+
+The actual SURD algorithm is in src/components/surd_lib/ and comes from
+https://github.com/ALD-Lab/SURD (Martínez-Sánchez et al., 2024).
 """
 
 import numpy as np
 import pandas as pd
-from itertools import combinations
 
+from src.components.surd_lib.surd_core import surd
+from src.components.data_transformation import build_lagged_array, build_histogram
 from src.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-# ── Low-level information theory helpers ─────────────────────────────
+def run_surd(df: pd.DataFrame, target: str, agents: list[str],
+             tau: int = 1, nbins: int = 10) -> dict:
+    """Run the full SURD causal decomposition.
 
-def _prob_table(series: pd.Series) -> dict:
-    """Count how often each value appears and return probabilities."""
-    counts = series.value_counts()
-    total = counts.sum()
-    return (counts / total).to_dict()
+    Args:
+        df:     DataFrame with time-series data (rows in time order).
+        target: Name of the target column (variable whose future I'm predicting).
+        agents: Names of the agent columns (variables whose past might cause the target).
+        tau:    Time lag in number of rows.
+        nbins:  Number of histogram bins per variable.
 
-
-def _joint_prob(col_a: pd.Series, col_b: pd.Series) -> dict:
-    """Joint probability of two columns as {(a,b): p} dict."""
-    paired = list(zip(col_a, col_b))
-    n = len(paired)
-    counts = {}
-    for pair in paired:
-        counts[pair] = counts.get(pair, 0) + 1
-    return {k: v / n for k, v in counts.items()}
-
-
-def _mutual_info(x: pd.Series, y: pd.Series) -> float:
-    """Mutual information I(X;Y) in bits."""
-    px = _prob_table(x)
-    py = _prob_table(y)
-    pxy = _joint_prob(x, y)
-
-    mi = 0.0
-    for (xv, yv), pj in pxy.items():
-        if pj > 0 and px.get(xv, 0) > 0 and py.get(yv, 0) > 0:
-            mi += pj * np.log2(pj / (px[xv] * py[yv]))
-    return max(mi, 0.0)
-
-
-def _conditional_prob_y_given_x(x: pd.Series, y: pd.Series) -> dict:
-    """Returns {(x_val, y_val): P(y|x)} for every observed pair."""
-    pxy = _joint_prob(x, y)
-    px = _prob_table(x)
-    cond = {}
-    for (xv, yv), pj in pxy.items():
-        if px.get(xv, 0) > 0:
-            cond[(xv, yv)] = pj / px[xv]
-    return cond
-
-
-def _joint_mi(x1: pd.Series, x2: pd.Series, y: pd.Series) -> float:
-    """Mutual information I(X1,X2 ; Y) — treat (X1,X2) as one joint variable."""
-    joint_x = pd.Series(list(zip(x1, x2)), index=x1.index)
-    return _mutual_info(joint_x, y)
-
-
-# ── I_min redundancy (Williams & Beer 2010) ─────────────────────────
-
-def _specific_info(x: pd.Series, y: pd.Series, y_val) -> float:
-    """Specific information I(X; Y=y) = sum_x p(x|y) * log2(p(x|y)/p(x))."""
-    px = _prob_table(x)
-    cond = _conditional_prob_y_given_x(y, x)
-
-    si = 0.0
-    for xv in px:
-        p_x_given_y = cond.get((y_val, xv), 0.0)
-        if p_x_given_y > 0 and px[xv] > 0:
-            si += p_x_given_y * np.log2(p_x_given_y / px[xv])
-    return si
-
-
-def _i_min(x1: pd.Series, x2: pd.Series, y: pd.Series) -> float:
-    """I_min redundancy: sum_y p(y) * min(I_spec(X1;y), I_spec(X2;y))."""
-    py = _prob_table(y)
-    redundancy = 0.0
-    for yv, p_yv in py.items():
-        si1 = _specific_info(x1, y, yv)
-        si2 = _specific_info(x2, y, yv)
-        redundancy += p_yv * min(si1, si2)
-    return max(redundancy, 0.0)
-
-
-# ── Public API ───────────────────────────────────────────────────────
-
-def compute_pid_2source(df: pd.DataFrame, src1: str, src2: str,
-                        target: str) -> dict:
-    """PID for exactly 2 sources and 1 target.
-
-    Returns dict with unique_x1, unique_x2, redundant, synergy (all in bits).
+    Returns:
+        dict with unique, redundant, synergy breakdowns, info_leak,
+        mutual info, raw SURD outputs, method name, and metadata.
     """
-    x1 = df[src1]
-    x2 = df[src2]
-    y = df[target]
+    n_agents = len(agents)
+    if n_agents < 1:
+        raise ValueError("Need at least 1 agent variable.")
+    if tau < 1:
+        raise ValueError("Lag tau must be at least 1.")
 
-    mi_x1_y = _mutual_info(x1, y)
-    mi_x2_y = _mutual_info(x2, y)
-    mi_joint = _joint_mi(x1, x2, y)
-    redundant = _i_min(x1, x2, y)
+    # Extract the columns as numpy arrays.
+    target_series = df[target].values.astype(float)
+    agent_series = [df[a].values.astype(float) for a in agents]
 
-    unique_x1 = max(mi_x1_y - redundant, 0.0)
-    unique_x2 = max(mi_x2_y - redundant, 0.0)
-    synergy = max(mi_joint - unique_x1 - unique_x2 - redundant, 0.0)
+    # Step 1 — Build the time-lagged array.
+    Y = build_lagged_array(target_series, agent_series, tau)
+    n_timepoints = Y.shape[1]
 
-    return {
-        "unique_x1": round(unique_x1, 6),
-        "unique_x2": round(unique_x2, 6),
-        "redundant": round(redundant, 6),
-        "synergy": round(synergy, 6),
-        "mi_x1_y": round(mi_x1_y, 6),
-        "mi_x2_y": round(mi_x2_y, 6),
-        "mi_joint": round(mi_joint, 6),
-    }
+    # Step 2 — Build the joint histogram.
+    hist = build_histogram(Y, nbins)
 
+    # Step 3 — Run the official SURD decomposition.
+    I_R, I_S, MI, info_leak = surd(hist)
 
-def compute_surd(df_binned: pd.DataFrame, sources: list[str],
-                 target: str) -> dict:
-    """Run PID-based decomposition and return a standard results dict.
+    logger.info("SURD complete. Info leak = %.4f", info_leak)
 
-    For 2 sources: direct PID.
-    For >2 sources: PID on every pair, then aggregate.
-    """
-    n = len(sources)
+    # Step 4 — Translate tuple keys into readable names.
+    unique = {}
+    redundant = {}
+    synergy = {}
 
-    if n == 2:
-        pid = compute_pid_2source(df_binned, sources[0], sources[1], target)
-        unique = {
-            sources[0]: pid["unique_x1"],
-            sources[1]: pid["unique_x2"],
-        }
-        logger.info("PID computed for 2 sources -> target '%s'.", target)
-        return {
-            "unique": unique,
-            "redundant": pid["redundant"],
-            "synergy": pid["synergy"],
-            "pairwise_synergy": None,
-            "pairwise_redundancy": None,
-            "method": "PID I_min (Williams & Beer 2010), 2-source",
-        }
+    for key, value in I_R.items():
+        label = _key_to_label(key, agents)
+        if len(key) == 1:
+            unique[label] = round(float(value), 6)
+        else:
+            redundant[label] = round(float(value), 6)
 
-    # More than 2 sources: pairwise mode.
-    pairwise_syn = {}
-    pairwise_red = {}
-    unique_accum = {s: [] for s in sources}
+    for key, value in I_S.items():
+        label = _key_to_label(key, agents)
+        synergy[label] = round(float(value), 6)
 
-    for a, b in combinations(sources, 2):
-        pid = compute_pid_2source(df_binned, a, b, target)
-        key = f"{a}|{b}"
-        pairwise_syn[key] = pid["synergy"]
-        pairwise_red[key] = pid["redundant"]
-        unique_accum[a].append(pid["unique_x1"])
-        unique_accum[b].append(pid["unique_x2"])
+    mi_named = {}
+    for key, value in MI.items():
+        label = _key_to_label(key, agents)
+        mi_named[label] = round(float(value), 6)
 
-    # Average unique across all pairs each source appeared in.
-    unique = {s: round(float(np.mean(vals)), 6)
-              for s, vals in unique_accum.items()}
+    # Step 5 — Summary totals.
+    total_unique = sum(unique.values())
+    total_redundant = sum(redundant.values())
+    total_synergy = sum(synergy.values())
 
-    # Overall redundancy and synergy = average across pairs.
-    redundant = round(float(np.mean(list(pairwise_red.values()))), 6)
-    synergy = round(float(np.mean(list(pairwise_syn.values()))), 6)
-
-    logger.info("PID (pairwise) computed for %d sources -> '%s'.", n, target)
     return {
         "unique": unique,
-        "redundant": redundant,
-        "synergy": synergy,
-        "pairwise_synergy": pairwise_syn,
-        "pairwise_redundancy": pairwise_red,
-        "method": f"PID I_min pairwise over {n} sources",
+        "redundant_breakdown": redundant,
+        "synergy_breakdown": synergy,
+        "total_unique": round(total_unique, 6),
+        "total_redundant": round(total_redundant, 6),
+        "total_synergy": round(total_synergy, 6),
+        "info_leak": round(float(info_leak), 6),
+        "mutual_info": mi_named,
+        "I_R_raw": {str(k): float(v) for k, v in I_R.items()},
+        "I_S_raw": {str(k): float(v) for k, v in I_S.items()},
+        "MI_raw": {str(k): float(v) for k, v in MI.items()},
+        "method": "SURD (Martínez-Sánchez et al., 2024)",
+        "meta": {
+            "tau": tau,
+            "nbins": nbins,
+            "n_agents": n_agents,
+            "n_timepoints": n_timepoints,
+            "target": target,
+            "agent_names": agents,
+        },
     }
+
+
+def _key_to_label(key: tuple, agent_names: list[str]) -> str:
+    """Convert a SURD tuple key like (1,2) into agent names like 'temp|humid'."""
+    parts = []
+    for idx in key:
+        agent_idx = idx - 1
+        if 0 <= agent_idx < len(agent_names):
+            parts.append(agent_names[agent_idx])
+        else:
+            parts.append(f"var{idx}")
+    return "|".join(parts)
