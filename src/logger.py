@@ -1,4 +1,4 @@
-"""logs for tracking"""
+"""Sets up logging so I can track what the app is doing."""
 
 import logging
 import os

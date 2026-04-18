@@ -1,8 +1,8 @@
-"""Custom exceptons so errors are easy to understand."""
+"""Custom exceptions so errors are easy to understand."""
 
 
 class SURDviewError(Exception):
-    """ Main error to be used for now """
+    """Base error for anything that goes wrong in SURDview."""
 
     def __init__(self, message: str):
         self.message = message
@@ -10,10 +10,10 @@ class SURDviewError(Exception):
 
 
 class DataValidationError(SURDviewError):
-    """error for uploading"""
+    """Raised when the uploaded data has problems."""
     pass
 
 
 class AnalysisError(SURDviewError):
-    """error for actually seeing the file"""
+    """Raised when the SURD computation fails."""
     pass

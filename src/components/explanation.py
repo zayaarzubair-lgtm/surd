@@ -1,13 +1,8 @@
-"""Turns PID results into readable text — plain or technical."""
+"""Turns SURD results into readable text — plain or technical mode."""
 
 
 def generate_explanation(result: dict, mode: str = "plain") -> str:
-    """Build a human-readable summary.
-
-    Args:
-        result: Full analysis result dict.
-        mode: 'plain' for non-technical, 'technical' for more detail.
-    """
+    """Build a human-readable summary of the SURD results."""
     if mode == "technical":
         return _technical(result)
     return _plain(result)
@@ -17,44 +12,51 @@ def _plain(result: dict) -> str:
     """Non-technical explanation anyone can understand."""
     meta = result["meta"]
     unique = result["unique"]
-    sources = meta["sources"]
     target = meta["target"]
+    agents = meta["agent_names"]
+    tau = meta["tau"]
 
-    best_src = max(unique, key=unique.get)
-    worst_src = min(unique, key=unique.get)
+    # Find the agent with the most unique causal contribution.
+    if unique:
+        best = max(unique, key=unique.get)
+        worst = min(unique, key=unique.get)
+    else:
+        best = worst = "N/A"
 
-    total_unique = sum(unique.values())
-    total = total_unique + result["redundant"] + result["synergy"]
-    if total == 0:
-        total = 1  # avoid division by zero
+    total = result["total_unique"] + result["total_redundant"] + result["total_synergy"]
+    safe_total = total if total > 0 else 1
 
-    syn_pct = result["synergy"] / total * 100
-    red_pct = result["redundant"] / total * 100
+    syn_pct = result["total_synergy"] / safe_total * 100
+    red_pct = result["total_redundant"] / safe_total * 100
+    leak_pct = result["info_leak"] * 100
 
     lines = [
         f"### What the analysis found\n",
-        f"We looked at how **{len(sources)} variables** work together to "
-        f"predict **{target}** ({meta['n_rows']} data points).\n",
-        f"- **{best_src}** is the most useful source on its own "
-        f"({unique[best_src]:.4f} bits of unique information).",
-        f"- **{worst_src}** contributes the least unique information "
-        f"({unique[worst_src]:.4f} bits).",
-        f"- **{red_pct:.1f}%** of the information is redundant — "
-        "meaning multiple sources tell you the same thing.",
+        f"I analysed how **{len(agents)} variables** causally influence the "
+        f"future of **{target}** using a time lag of **{tau} step(s)** "
+        f"({meta['n_timepoints']} usable time points).\n",
+        f"- **{best}** has the strongest unique causal influence "
+        f"({unique.get(best, 0):.4f} bits).",
+        f"- **{worst}** has the weakest unique influence "
+        f"({unique.get(worst, 0):.4f} bits).",
+        f"- **{red_pct:.1f}%** of the causal information is redundant — "
+        "meaning multiple agents carry the same predictive power.",
         f"- **{syn_pct:.1f}%** is synergistic — "
-        "information that only appears when sources are combined.",
+        "causal information that only appears when agents are combined.",
+        f"- **{leak_pct:.1f}%** of the target's future is unexplained — "
+        "suggesting hidden causes not included in the analysis.",
     ]
 
-    if result.get("pairwise_synergy"):
-        pw = result["pairwise_synergy"]
-        top_pair = max(pw, key=pw.get)
-        a, b = top_pair.split("|")
+    # Highlight the top synergistic pair if available.
+    syn = result.get("synergy_breakdown", {})
+    if syn:
+        top_pair = max(syn, key=syn.get)
         lines.append(
-            f"- The pair **{a}** + **{b}** has the strongest synergy "
-            f"({pw[top_pair]:.4f} bits)."
+            f"- The strongest synergistic combination is **{top_pair.replace('|', ' + ')}** "
+            f"({syn[top_pair]:.4f} bits)."
         )
 
-    if result["warnings"]:
+    if result.get("warnings"):
         lines.append("\n### Warnings")
         for w in result["warnings"]:
             lines.append(f"- {w}")
@@ -63,50 +65,59 @@ def _plain(result: dict) -> str:
 
 
 def _technical(result: dict) -> str:
-    """More detailed explanation with formulas and method info."""
+    """Detailed explanation with method info and exact values."""
     meta = result["meta"]
     unique = result["unique"]
-    sources = meta["sources"]
     target = meta["target"]
+    agents = meta["agent_names"]
     method = result.get("method", "Unknown")
+    tau = meta["tau"]
 
-    total_unique = sum(unique.values())
-    mi_total = total_unique + result["redundant"] + result["synergy"]
+    total = result["total_unique"] + result["total_redundant"] + result["total_synergy"]
 
     lines = [
         f"### Technical summary\n",
         f"**Method:** {method}\n",
-        f"**Variables:** {len(sources)} sources → target `{target}` "
-        f"| {meta['n_rows']} rows | bins={meta['params']['bins']}\n",
-        "**PID identity:**  "
-        "I(X₁,X₂;Y) = Unique(X₁) + Unique(X₂) + Redundancy + Synergy\n",
-        "**Computed values (bits):**\n",
+        f"**Target:** {target} (future, t+{tau})\n",
+        f"**Agents:** {', '.join(agents)} (past, t)\n",
+        f"**Parameters:** tau={tau}, nbins={meta['nbins']}, "
+        f"n_timepoints={meta['n_timepoints']}\n",
+        "**SURD identity:**\n",
+        "H(Q_j⁺) = ΔI_redundant + ΔI_unique + ΔI_synergistic + ΔI_leak\n",
+        "**Unique causal contributions (bits):**\n",
     ]
 
-    for s in sources:
-        lines.append(f"- Unique({s}) = {unique[s]:.6f}")
+    for name, val in unique.items():
+        lines.append(f"- Unique({name} → {target}) = {val:.6f}")
 
-    lines.append(f"- Redundancy = {result['redundant']:.6f}")
-    lines.append(f"- Synergy = {result['synergy']:.6f}")
-    lines.append(f"- **Total I(sources;target) ≈ {mi_total:.6f}**\n")
+    lines.append(f"\n**Redundant causal contributions (bits):**\n")
+    for name, val in result.get("redundant_breakdown", {}).items():
+        lines.append(f"- Redundant({name.replace('|', ', ')}) = {val:.6f}")
+
+    lines.append(f"\n**Synergistic causal contributions (bits):**\n")
+    for name, val in result.get("synergy_breakdown", {}).items():
+        lines.append(f"- Synergy({name.replace('|', ', ')}) = {val:.6f}")
+
+    lines.append(f"\n**Totals:**")
+    lines.append(f"- Total unique = {result['total_unique']:.6f}")
+    lines.append(f"- Total redundant = {result['total_redundant']:.6f}")
+    lines.append(f"- Total synergy = {result['total_synergy']:.6f}")
+    lines.append(f"- **I(Q_j⁺ ; Q) ≈ {total:.6f}**")
+    lines.append(f"- Information leak = {result['info_leak']:.6f} "
+                 f"({result['info_leak']*100:.1f}% of target entropy)\n")
 
     lines.append(
-        "**How it works:** Redundancy is measured using I_min — for each "
-        "outcome y, we take the minimum specific information that either "
-        "source provides, then average over all outcomes. Unique information "
-        "is what remains after subtracting redundancy from each source's "
-        "mutual information with the target. Synergy is whatever the joint "
-        "mutual information has beyond the sum of unique and redundant parts."
+        "**How SURD works:** Causality is measured as the increments of "
+        "information gained about the target's future from observing the "
+        "agents' past. The algorithm computes specific mutual information "
+        "for every subset of agents, sorts them, and assigns incremental "
+        "gains to redundancy (when a single agent provides the increment) "
+        "or synergy (when a combination is needed). The leak captures "
+        "the fraction of the target's uncertainty that no observed agent "
+        "can explain, indicating hidden or unmeasured causes."
     )
 
-    if result.get("pairwise_synergy"):
-        lines.append("\n**Pairwise results:**\n")
-        for key, val in result["pairwise_synergy"].items():
-            a, b = key.split("|")
-            red_val = result.get("pairwise_redundancy", {}).get(key, 0)
-            lines.append(f"- {a} + {b}: synergy={val:.6f}, redundancy={red_val:.6f}")
-
-    if result["warnings"]:
+    if result.get("warnings"):
         lines.append("\n**Warnings:**")
         for w in result["warnings"]:
             lines.append(f"- {w}")

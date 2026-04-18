@@ -1,57 +1,106 @@
-"""All Plotly chart-building functions live here."""
+"""All Plotly chart-building functions for the SURD dashboard."""
 
 import plotly.graph_objects as go
 
 COLOURS = {
-    "unique": "#3b82f6",
-    "redundant": "#f59e0b",
-    "synergy": "#10b981",
+    "unique": "#d62828",
+    "redundant": "#003049",
+    "synergy": "#f77f00",
+    "leak": "#888888",
     "bg": "rgba(0,0,0,0)",
 }
 
 
 def make_overview_fig(result: dict) -> go.Figure:
-    """Stacked bar chart showing Unique / Redundant / Synergy per source."""
-    sources = list(result["unique"].keys())
-    unique_vals = [result["unique"][s] for s in sources]
-    n = len(sources)
+    """Stacked bar showing unique, redundant, and synergy totals."""
+    labels = ["Unique", "Redundant", "Synergy"]
+    values = [result["total_unique"], result["total_redundant"], result["total_synergy"]]
+    colours = [COLOURS["unique"], COLOURS["redundant"], COLOURS["synergy"]]
 
-    # Spread redundant and synergy evenly across bars.
-    red_each = result["redundant"] / n if n else 0
-    syn_each = result["synergy"] / n if n else 0
-
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        name="Unique", x=sources, y=unique_vals,
-        marker_color=COLOURS["unique"],
-    ))
-    fig.add_trace(go.Bar(
-        name="Redundant", x=sources, y=[red_each] * n,
-        marker_color=COLOURS["redundant"],
-    ))
-    fig.add_trace(go.Bar(
-        name="Synergy", x=sources, y=[syn_each] * n,
-        marker_color=COLOURS["synergy"],
-    ))
+    fig = go.Figure(data=[go.Bar(
+        x=labels, y=values,
+        marker_color=colours,
+        text=[f"{v:.4f}" for v in values],
+        textposition="auto",
+    )])
     fig.update_layout(
-        barmode="stack",
-        title="PID Decomposition — Overview",
-        xaxis_title="Source variable",
+        title="SURD Causal Decomposition — Totals",
         yaxis_title="Information (bits)",
         template="plotly_white",
-        plot_bgcolor=COLOURS["bg"],
-        legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                    xanchor="center", x=0.5),
+        height=400,
+    )
+    return fig
+
+
+def make_breakdown_fig(result: dict) -> go.Figure:
+    """Bar chart showing every individual SURD component."""
+    labels = []
+    values = []
+    colours = []
+
+    # Unique contributions.
+    for name, val in result.get("unique", {}).items():
+        labels.append(f"U({name})")
+        values.append(val)
+        colours.append(COLOURS["unique"])
+
+    # Redundant contributions.
+    for name, val in result.get("redundant_breakdown", {}).items():
+        labels.append(f"R({name.replace('|', ',')})")
+        values.append(val)
+        colours.append(COLOURS["redundant"])
+
+    # Synergistic contributions.
+    for name, val in result.get("synergy_breakdown", {}).items():
+        labels.append(f"S({name.replace('|', ',')})")
+        values.append(val)
+        colours.append(COLOURS["synergy"])
+
+    # Normalise so bars sum to 1 (matching the paper's convention).
+    total = sum(values) if sum(values) > 0 else 1
+    norm_values = [v / total for v in values]
+
+    fig = go.Figure(data=[go.Bar(
+        x=labels, y=norm_values,
+        marker_color=colours,
+        text=[f"{v:.3f}" for v in norm_values],
+        textposition="auto",
+    )])
+    fig.update_layout(
+        title="SURD Decomposition — All Components (normalised)",
+        yaxis_title="Fraction of total causal information",
+        template="plotly_white",
         height=420,
     )
     return fig
 
 
+def make_leak_fig(result: dict) -> go.Figure:
+    """Simple bar showing the information leak."""
+    leak = result.get("info_leak", 0)
+
+    fig = go.Figure(data=[go.Bar(
+        x=["Information leak"],
+        y=[leak],
+        marker_color=COLOURS["leak"],
+        text=[f"{leak:.2%}"],
+        textposition="auto",
+        width=[0.4],
+    )])
+    fig.update_layout(
+        title="Causality Leak — Unexplained by Observed Variables",
+        yaxis_title="Fraction of target entropy",
+        yaxis=dict(range=[0, 1]),
+        template="plotly_white",
+        height=300,
+    )
+    return fig
+
+
 def make_pie_fig(result: dict) -> go.Figure:
-    """Pie chart showing the share of unique, redundant, and synergy."""
-    total_unique = sum(result["unique"].values())
-    labels = ["Unique (total)", "Redundant", "Synergy"]
-    values = [total_unique, result["redundant"], result["synergy"]]
+    """Donut chart showing the share of unique, redundant, and synergy."""
+    labels = ["Unique (total)", "Redundant (total)", "Synergy (total)"]
+    values = [result["total_unique"], result["total_redundant"], result["total_synergy"]]
     colours = [COLOURS["unique"], COLOURS["redundant"], COLOURS["synergy"]]
 
     fig = go.Figure(data=[go.Pie(
@@ -60,48 +109,18 @@ def make_pie_fig(result: dict) -> go.Figure:
         textinfo="label+percent", hole=0.35,
     )])
     fig.update_layout(
-        title="Information share",
+        title="Causal information share",
         template="plotly_white", height=360,
     )
     return fig
 
 
-def make_heatmap_fig(result: dict, field: str = "pairwise_synergy") -> go.Figure:
-    """Heatmap of pairwise synergy (or redundancy) between sources."""
-    pw = result.get(field)
-    if not pw:
-        return _empty_figure("Pairwise data requires more than 2 sources.")
-
-    sources = list(result["unique"].keys())
-    n = len(sources)
-    z = [[0.0] * n for _ in range(n)]
-
-    for key_str, val in pw.items():
-        a, b = key_str.split("|")
-        i, j = sources.index(a), sources.index(b)
-        z[i][j] = val
-        z[j][i] = val
-
-    title = "Pairwise synergy" if "synergy" in field else "Pairwise redundancy"
-    fig = go.Figure(data=go.Heatmap(
-        z=z, x=sources, y=sources,
-        colorscale="Teal" if "synergy" in field else "YlOrRd",
-        text=[[f"{v:.4f}" for v in row] for row in z],
-        texttemplate="%{text}",
-        hovertemplate="(%{x}, %{y}): %{z:.4f}<extra></extra>",
-    ))
-    fig.update_layout(
-        title=title, template="plotly_white", height=420,
-    )
-    return fig
-
-
 def make_evaluation_fig(eval_results: list[dict]) -> go.Figure:
-    """Grouped bar chart comparing PID across evaluation datasets."""
+    """Grouped bar chart comparing SURD across evaluation datasets."""
     names = [r["dataset"] for r in eval_results]
-    total_unique = [sum(r["result"]["unique"].values()) for r in eval_results]
-    redundant = [r["result"]["redundant"] for r in eval_results]
-    synergy = [r["result"]["synergy"] for r in eval_results]
+    total_unique = [r["result"]["total_unique"] for r in eval_results]
+    redundant = [r["result"]["total_redundant"] for r in eval_results]
+    synergy = [r["result"]["total_synergy"] for r in eval_results]
 
     fig = go.Figure()
     fig.add_trace(go.Bar(name="Unique", x=names, y=total_unique,
@@ -112,19 +131,8 @@ def make_evaluation_fig(eval_results: list[dict]) -> go.Figure:
                          marker_color=COLOURS["synergy"]))
     fig.update_layout(
         barmode="group",
-        title="Evaluation — Expected vs observed decomposition",
+        title="Evaluation — Expected vs observed causal decomposition",
         yaxis_title="Information (bits)",
         template="plotly_white", height=400,
-    )
-    return fig
-
-
-def _empty_figure(message: str) -> go.Figure:
-    """Blank chart with a centred message."""
-    fig = go.Figure()
-    fig.add_annotation(text=message, showarrow=False, font=dict(size=16))
-    fig.update_layout(
-        xaxis=dict(visible=False), yaxis=dict(visible=False),
-        template="plotly_white", height=300,
     )
     return fig
