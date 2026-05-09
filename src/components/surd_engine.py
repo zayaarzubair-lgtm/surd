@@ -115,3 +115,23 @@ def _key_to_label(key: tuple, agent_names: list[str]) -> str:
         else:
             parts.append(f"var{idx}")
     return "|".join(parts)
+
+
+def run_lag_sweep(df, target: str, agents: list[str],
+                  tau_list: list[int], nbins: int = 10) -> list[dict]:
+    """Run SURD at multiple tau values and return a list of summary dicts."""
+    results = []
+    for tau in tau_list:
+        try:
+            r = run_surd(df, target=target, agents=agents,
+                         tau=tau, nbins=nbins)
+            results.append({
+                "tau": tau,
+                "total_unique": r["total_unique"],
+                "total_redundant": r["total_redundant"],
+                "total_synergy": r["total_synergy"],
+                "info_leak": r["info_leak"],
+            })
+        except Exception as exc:
+            logger.warning("Lag sweep failed at tau=%d: %s", tau, exc)
+    return results
